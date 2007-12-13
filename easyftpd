@@ -32,9 +32,17 @@ class SlimFTPServer(object):
     def __init__(self, port, config, logpath, silent):
 
         # Open logfiles
-        self._main_log = open(os.path.join(logpath, "access"), "a")
-        self._err_log = open(os.path.join(logpath, "error"), "a")
-        #self._line_log = open(os.path.join(logpath, "lines"), "a")
+        try: # Try logpath first
+            self._main_log = open(os.path.join(logpath, "access"), "a")
+            self._err_log = open(os.path.join(logpath, "error"), "a")
+            #self._line_log = open(os.path.join(logpath, "lines"), "a")
+        except: # No write permissions there. Fall back to current dir
+            print 'You do not have permission to write to the logpath "%s".' % logpath
+            print 'Falling back to the current directory for logs'
+
+            self._main_log = open("access", "a")
+            self._err_log = open("error", "a")
+            #self._line_log = open("lines", "a")
 
         # Setup logging
 
