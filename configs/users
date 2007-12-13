@@ -1,1 +1,4 @@
-pub:test:r:/tmp/
+#Put users here. Use the syntax listed below
+#username:password:rw:/home/user/ftp_share
+#More information on configuring users can be found at
+#http://code.google.com/p/easyftpd/

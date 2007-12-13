@@ -1,10 +1,17 @@
+default_port: 21
+
 anonymous: no
 anonymous_root: /tmp
 anonymous_perm: r
+
+disable_logging: no
+
+banner: Test FTP 1
 welcome_msg: Welcome!
 goodbye_msg: Goodbye! I hope you enjoyed your visit!
-banner: Test FTP 1
+
 max_login_attempts: 3
 max_connections: 50
 max_connections_per_ip: 10
+
 user_file: /etc/easyftpd/users
