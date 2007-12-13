@@ -1,0 +1,216 @@
+#!/usr/bin/env python
+import sha
+import os
+import sys
+import getopt
+import time
+
+import easy_ftpd.lib.ftpserver as ftpserver
+import easy_ftpd.tools.usertools as usertools
+import easy_ftpd.tools.configtools as configtools
+
+class TrashFile(object): #file-like object
+    def close(self): pass
+    def flush(self): pass
+    def read(self, size=None): pass
+    def write(self, s): pass
+
+class DummySHAAuthorizer(ftpserver.DummyAuthorizer):
+
+    def validate_authentication(self, username, password):
+        realpass = self.user_table[username]['pwd']
+        if len(realpass) == 40: # assume SHA-hash
+            shahash = sha.new(username+password).hexdigest()
+            return realpass == shahash            
+        else: # assume plain-text
+            return realpass == password
+
+def get_time():
+        return time.strftime("[%Y-%b-%d %H:%M:%S] ")
+
+class SlimFTPServer(object):
+    def __init__(self, port, config, logpath, silent):
+
+        # Open logfiles
+        self._main_log = open(os.path.join(logpath, "access"), "a")
+        self._err_log = open(os.path.join(logpath, "error"), "a")
+        #self._line_log = open(os.path.join(logpath, "lines"), "a")
+
+        # Setup logging
+
+        if silent:
+            ftpserver.log = self._silent_logger
+            ftpserver.logerror = self._silent_logger
+            ftpserver.logline = self._silent_logger
+        else:
+            ftpserver.log = self._main_logger
+            ftpserver.logerror = self._err_logger
+            ftpserver.logline = self._silent_logger#self._line_logger
+        
+        configfile = open(config,"rb")
+        self.configs = configtools.load(configfile)
+        configfile.close()
+        
+        userfile = open(self.configs["user_file"],"rb")
+        self.users = usertools.load(userfile)
+        userfile.close()
+        
+        ftp_handler = self._get_handler()
+
+        address = ('', port)
+        self.ftpd = self._get_ftpd(address, ftp_handler)
+
+    def run(self):
+        self.ftpd.serve_forever()
+
+    def _silent_logger(self, msg):
+        pass
+
+    def _main_logger(self, msg):
+        self._main_log.write(get_time() + msg + '\n')
+
+    def _line_logger(self, msg):
+        self._line_log.write(get_time() + msg + '\n')
+
+    def _err_logger(self, msg):
+        self._err_log.write(get_time() + msg + '\n')
+
+    def _get_handler(self):
+        authorizer = self._get_auths()
+        
+        ftp_handler = ftpserver.FTPHandler
+        ftp_handler.authorizer = authorizer
+        ftp_handler.banner = self.configs["banner"]
+        ftp_handler.max_login_attempts = int(self.configs["max_login_attempts"])
+        return ftp_handler
+
+    def _get_ftpd(self, address, handler):
+        ftpd = ftpserver.FTPServer(address, handler)
+        ftpd.max_cons = int(self.configs["max_connections"])
+        ftpd.max_cons_per_ip = int(self.configs["max_connections_per_ip"])
+        return ftpd
+
+    def _get_auths(self):
+        authorizer = DummySHAAuthorizer()
+
+        # pointers for convinience
+        configs = self.configs
+        users = self.users
+    
+        if configs["anonymous"] == "yes":
+            anoroot = configs["anonymous_root"]
+            anoperm = configs["anonymous_perm"]
+            authorizer.add_anonymous(
+                anoroot,
+                perm=tuple(anoperm),
+                msg_login=configs["welcome_msg"],
+                msg_quit=configs["goodbye_msg"]
+                )
+    
+        for username in users:
+            user = users[username]
+            authorizer.add_user(
+                user.name,
+                user.pw,
+                user.root,
+                perm=tuple(user.perms),
+                msg_login=configs["welcome_msg"],
+                msg_quit=configs["goodbye_msg"]
+                )
+
+        return authorizer
+
+if __name__ == "__main__":
+
+    def usage():
+        print "Usage: easyftpd [options]"
+        print ""
+        print "Options:"
+        print "--------"
+        print " -p PORTNO       Port to run server at (Default: 21)"
+        print " -c FILEPATH     Configuration file (Default: /etc/easyftpd/config)"
+        print " -d              Run as a daemon"
+        print " -l DIRPATH      Directory to use for logging (Default: /var/log/easyftpd)"
+        print " -s              Silent mode. Disables logging"
+        print " -h, --help      Print available options"
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "p:c:dl:s", ["help"])
+    except getopt.GetoptError:
+        # print help information and exit:
+        usage()
+        sys.exit(2)
+
+    port = 2100
+    configfile = "/etc/easyftpd/config"
+    logpath = "/var/log/easyftpd"
+    daemon = False
+    silent = False
+    
+    for o, a in opts:
+        if o == "-p":
+            try:
+                port = int(a)
+            except ValueError:
+                print >> sys.stderr, "Invalid value for port"
+                usage()
+                sys.exit(2)
+        if o == "-c":
+            if not (os.path.isfile(a) or os.path.islink(a)):
+                print >> sys.stderr, "Configuration file does not exist"
+                usage()
+                sys.exit(2)
+            configfile = a
+        if o == "-d":
+            daemon = True
+        if o == "-s":
+            silent = True
+        if o == "-l":
+            if not (os.path.isdir(a) or os.path.islink(a)):
+                print >> sys.stderr, 'Logging directory "%s" invalid' % a
+                usage()
+                sys.exit(2)
+            logpath = a
+        if o == "--help":
+            usage()
+            sys.exit(0)
+
+    # Running as daemon
+    # From http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/66012
+    if daemon:
+        try: 
+            pid = os.fork() 
+            if pid > 0:
+                # exit parent
+                sys.exit(0) 
+        except OSError, e: 
+            print >> sys.stderr, "fork #1 failed: %d (%s)" % (e.errno, e.strerror) 
+            sys.exit(1)
+
+        # decouple from parent environment
+        #os.chdir("/") 
+        os.setsid() 
+        os.umask(0) 
+
+        # do second fork
+        try: 
+            pid = os.fork() 
+            if pid > 0:
+                # exit from second parent, print eventual PID before
+                print "Running easyFTPD as a Daemon at PID %d" % pid 
+                sys.exit(0) 
+        except OSError, e: 
+            print >>sys.stderr, "fork #2 failed: %d (%s)" % (e.errno, e.strerror) 
+            sys.exit(1) 
+
+        # If ctypes is available, use it to set the process name
+        # Not used until I'm sure it's safe
+        #try:
+        #    import ctypes
+        #    libc = ctypes.CDLL('libc.so.6')
+        #    libc.prctl(15, 'easyftpd', 0, 0, 0)
+        #except ImportError:
+        #    pass
+
+    ftpd = SlimFTPServer(port, configfile, logpath, silent)
+    ftpd.run()
+
