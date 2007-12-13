@@ -154,6 +154,8 @@ proto_cmds = {
     'HELP': 'Syntax: HELP [<SP> cmd] (show help).',
     'LIST': 'Syntax: LIST [<SP> path-name] (list files).',
     'MDTM': 'Syntax: MDTM <SP> file-name (get last modification time).',
+    'MLSD': 'Syntax: MLSD [<SP> dir-name] (list files in a machine-processable form)',
+    'MLST': 'Syntax: MLST [<SP> path-name] (show a path in a machine-processable form)',
     'MODE': 'Syntax: MODE <SP> mode (obsolete; set data transfer mode).',
     'MKD' : 'Syntax: MDK <SP> dir-name (create directory).',
     'NLST': 'Syntax: NLST [<SP> path-name] (list files in a compact form).',
@@ -260,12 +262,12 @@ def debug(msg):
 class DummyAuthorizer:
     """Basic "dummy" authorizer class, suitable for subclassing to
     create your own custom authorizers.
-    
+
     An "authorizer" is a class handling authentications and permissions
     of the FTP server.  It is used inside FTPHandler class for verifying
     user's password, getting users home directory and checking user
     permissions when a file read/write event occurs.
-    
+
     DummyAuthorizer is the base authorizer, providing a platform
     independent interface for managing "virtual" FTP users. System
     dependent authorizers can by written by subclassing this base
@@ -304,7 +306,7 @@ class DummyAuthorizer:
                'msg_quit': str(msg_quit)
                }
         self.user_table[username] = dic
-        
+
     def add_anonymous(self, homedir, **kwargs):
         """Add an anonymous user to the virtual users table.
         AuthorizerError exception raised on error conditions such as
@@ -329,7 +331,7 @@ class DummyAuthorizer:
         stored credentials."""
         return self.user_table[username]['pwd'] == password
 
-    def has_user(self, username):        
+    def has_user(self, username):
         """Whether the username exists in the virtual users table."""
         return username in self.user_table
 
@@ -354,7 +356,6 @@ class DummyAuthorizer:
         """Whether the user has write permission for obj (an absolute
         pathname of a file or a directory)"""
         return 'w' in self.user_table[username]['perm']
-
 
 
 # --- DTP classes
@@ -821,30 +822,28 @@ class AbstractedFS:
 
     # --- Conversion utilities
 
-    def normalize(self, path):
-        """Translate a "virtual" FTP path into an absolute "virtual"
-        FTP path. Takes an absolute or relative virtual path and
-        returns an absolute virtual path.
+    def ftpnorm(self, ftppath):
+        """Normalize a "virtual" ftp pathname (tipically the raw string
+        coming from client) depending on the current working directory.
         
-        Note: directory separators are system independent ("/").
-        """
-        # absolute path
-        if os.path.isabs(path):
-            p = os.path.normpath(path)
-        # relative path
-        else:
-            p = os.path.normpath(os.path.join(self.cwd, path))
+        Example (having "/foo" as current working directory):
+        'x' -> '/foo/x'
 
+        Note: directory separators are system independent ("/").
+        Pathname returned is always absolutized.
+        """
+        if os.path.isabs(ftppath):
+            p = os.path.normpath(ftppath)
+        else:
+            p = os.path.normpath(os.path.join(self.cwd, ftppath))
         # normalize string in a standard web-path notation having '/'
         # as separator.
         p = p.replace("\\", "/")
-
         # os.path.normpath supports UNC paths (e.g. "//a/b/c") but we
         # don't need them.  In case we get an UNC path we collapse
         # redundant separators appearing at the beginning of the string
         while p[:2] == '//':
             p = p[1:]
-
         # Anti path traversal: don't trust user input, in the event
         # that self.cwd is not absolute, return "/" as a safety measure.
         # This is for extra protection, maybe not really necessary.
@@ -852,37 +851,55 @@ class AbstractedFS:
             p = "/"
         return p
 
-    def translate(self, path):
-        """Translate a 'virtual' FTP path into equivalent filesystem
-        path. Take an absolute or relative path as input and return a
-        full absolute file path.
+    def ftp2fs(self, ftppath):
+        """Translate a "virtual" ftp pathname (tipically the raw string
+        coming from client) into equivalent absolute "real" filesystem
+        pathname.
+        
+        Example (having "/home/user" as root directory):
+        'x' -> '/home/user/x'
         
         Note: directory separators are system dependent.
         """
         # as far as I know, it should always be path traversal safe...
         if os.path.normpath(self.root) == os.sep:
-            return os.path.normpath(self.normalize(path))
+            return os.path.normpath(self.ftpnorm(ftppath))
         else:
-            return os.path.normpath(self.root + self.normalize(path))
+            p = self.ftpnorm(ftppath)[1:]
+            return os.path.normpath(os.path.join(self.root, p))
         
-    def checkpath(self, abspath):
-        """Check whether the real abspath destination belongs to
-        home directory.  If abspath is a symbolic link we follow its
-        final destination to do so.
+    def fs2ftp(self, fspath):
+        """Translate a "real" filesystem pathname into equivalent
+        absolute "virtual" ftp pathname depending on the user's
+        root directory.
+        
+        Example (having "/home/user" as root directory):
+        '/home/user/x' -> '/x'
+        
+        As for ftpnorm, directory separators are system independent
+        ("/") and pathname returned is always absolutized.
+
+        On invalid pathnames escaping from user's root directory
+        (e.g. "/home" when root is "/home/user") always return "/".
         """
-        if not self.root.endswith(os.sep):
-            root = self.root + os.sep
+        if os.path.isabs(fspath):
+            p = os.path.normpath(fspath)
         else:
-            root = self.root
-        if not abspath.endswith(os.sep):
-            abspath = os.path.realpath(abspath) + os.sep
-        if abspath[0:len(root)] == root:
-            return True
-        else:
-            return False
-
-    # --- Wrapper methods around os.*, open(), glob and tempfile
-
+            p = os.path.normpath(os.path.join(self.root, fspath))
+        if not self.validpath(p):
+            return '/'
+        p = p.replace(os.sep, "/")
+        p = p[len(self.root):]
+        if not p.startswith('/'):
+            p = '/' + p
+        return p
+    
+    # alias for backward compatibility with 0.2.0
+    normalize = ftpnorm
+    translate = ftp2fs
+        
+    # --- Wrapper methods around open() and tempfile.mkstemp
+    
     def open(self, filename, mode):
         """Open a file returning its handler."""
         return open(filename, mode)
@@ -905,7 +922,83 @@ class AbstractedFS:
         fd, name = tempfile.mkstemp(suffix, prefix, dir, text=text)
         file = os.fdopen(fd, mode)
         return FileWrapper(file, name)
+    
+    # --- Wrapper methods around os.*
+    
+    def chdir(self, path):
+        """Change the current directory."""
+        # temporarily join the specified directory to see if we have
+        # permissions to do so
+        basedir = os.getcwd()
+        try:
+            os.chdir(path)
+        except os.error:
+            raise
+        else:
+            os.chdir(basedir)
+            self.cwd = self.fs2ftp(path)
 
+    def mkdir(self, path):
+        """Create the specified directory."""
+        os.mkdir(path)
+
+    def listdir(self, path):
+        """List the content of a directory."""
+        return os.listdir(path)
+
+    def rmdir(self, path):
+        """Remove the specified directory."""
+        os.rmdir(path)
+
+    def remove(self, path):
+        """Remove the specified file."""
+        os.remove(path)
+        
+    def rename(self, src, dst):
+        """Rename the specified src file to the dst filename."""
+        os.rename(src, dst)
+
+    def stat(self, path):
+        """Perform a stat() system call on the given path."""
+        return os.stat(path)
+
+    def lstat(self, path):
+        """Like stat but does not follow symbolic links."""
+        return os.lstat(path)
+
+    if not hasattr(os, 'lstat'):
+        lstat = stat
+        
+    # --- Wrapper methods around os.path.*
+
+    def isfile(self, path):
+        """Return True if path is a file."""
+        return os.path.isfile(path)
+
+    def islink(self, path):
+        """Return True if path is a symbolic link."""
+        return os.path.islink(path)
+
+    def isdir(self, path):
+        """Return True if path is a directory."""
+        return os.path.isdir(path)
+    
+    def getsize(self, path):
+        """Return the size of the specified file in bytes."""
+        return os.path.getsize(path)
+
+    def getmtime(self, path):
+        """Return the last modified time as a number of seconds since
+        the epoch."""
+        return os.path.getmtime(path)
+    
+    def realpath(self, path):
+        """Return the canonical version of path eliminating any
+        symbolic links encountered in the path (if they are
+        supported by the operating system).
+        """
+        return os.path.realpath(path)
+    
     def lexists(self, path):
         """Return True if path refers to an existing path, including
         a broken or circular symbolic link.
@@ -919,68 +1012,42 @@ class AbstractedFS:
             except os.error:
                 return False
             return True
-        # fallback 
+        # fallback
         else:
             return os.path.exists(path)
 
     exists = lexists  # alias for backward compatibility with 0.2.0
-        
-    def isfile(self, path):
-        """Return True if path is a file."""
-        return os.path.isfile(path)
 
-    def islink(self, path):
-        """Return True if path is a symbolic link."""
-        return os.path.islink(path)
-
-    def isdir(self, path):
-        """Return True if path is a directory."""
-        return os.path.isdir(path)
-
-    def chdir(self, path):
-        """Change the current directory."""
-        os.chdir(path)
-
-    def mkdir(self, path):
-        """Create the specified directory."""
-        os.mkdir(path)
-        
-    def listdir(self, path):
-        """List the content of a directory."""
-        return os.listdir(path)
-
-    def rmdir(self, path):
-        """Remove the specified directory."""
-        os.rmdir(path)
-            
-    def remove(self, path):
-        """Remove the specified file."""
-        os.remove(path)
+    # --- Utility methods
     
-    def getsize(self, path):
-        """Return the size of the specified file in bytes."""
-        return os.path.getsize(path)
-
-    def getmtime(self, path):
-        """Return the last modified time as a number of seconds since
-        the epoch."""
-        return os.path.getmtime(path)
-           
-    def rename(self, src, dst):
-        """Rename the specified src file to the dst filename."""
-        os.rename(src, dst)
-
+    def validpath(self, path):
+        """Check whether the path belongs to user's home directory.
+        Expected argument is a "real" filesystem path. If path is a
+        symbolic link it is resolved to check its real destination.
+        Pathnames escaping from user's root directory are considered
+        not valid.
+        """
+        root = self.realpath(self.root)
+        path = self.realpath(path)
+        if not self.root.endswith(os.sep):
+            root = self.root + os.sep
+        if not path.endswith(os.sep):
+            path = path + os.sep
+        if path[0:len(root)] == root:
+            return True
+        return False
+    
     def glob1(self, dirname, pattern):
         """Return a list of files matching a dirname pattern
         non-recursively.
-        Unlike glob.glob1 raises an exception if os.listdir() fails.
+        Unlike glob.glob1 raises exception if os.listdir() fails.
         """
         names = self.listdir(dirname)
         if pattern[0] != '.':
             names = filter(lambda x: x[0] != '.',names)
         return fnmatch.filter(names, pattern)
-
-    # --- utility methods
+    
+    # --- Listing utilities
     
     # Note that these are resource-intensive blocking operations so
     # you may want to override and move them into another
@@ -988,34 +1055,34 @@ class AbstractedFS:
     
     def get_list_dir(self, path):
         """Return a directory listing in a form suitable for LIST command."""
-        # if path is a file or a symlink we return information about it
-        if self.isfile(path)or self.islink(path):
-            basedir, filename = os.path.split(path)
-            listing = [filename]
-        else:
-            basedir = path
+        if self.isdir(path):
             listing = self.listdir(path)
             listing.sort()
-        return self.format_list(basedir, listing)
+            return self.format_list(path, listing)
+        # if path is a file or a symlink we return information about it
+        else:
+            basedir, filename = os.path.split(path)
+            return self.format_list(basedir, [filename], ignore_err=False)
 
     def get_stat_dir(self, rawline):
         """Return a list of files matching a dirname pattern
         non-recursively in a form suitable for STAT command.
+        rawline is the argument passed by client.
         """
-        path = self.normalize(rawline)
+        path = self.ftpnorm(rawline)
         basedir, basename = os.path.split(path)
         if not glob.has_magic(path):
-            data = self.get_list_dir(self.translate(rawline))
+            data = self.get_list_dir(self.ftp2fs(rawline))
         else:
             if not basedir:
-                basedir = self.translate(self.cwd)
+                basedir = self.ftp2fs(self.cwd)
                 listing = self.glob1(basedir, basename)
                 listing.sort()
                 data = self.format_list(basedir, listing)
             elif glob.has_magic(basedir):
                 return 'Directory recursion not supported.\r\n'
             else:
-                basedir = self.translate(basedir)
+                basedir = self.ftp2fs(basedir)
                 listing = self.glob1(basedir, basename)
                 listing.sort()
                 data = self.format_list(basedir, listing)
@@ -1023,12 +1090,13 @@ class AbstractedFS:
             return "Directory is empty.\r\n"
         return data
 
-    def format_list(self, basedir, listing):
+    def format_list(self, basedir, listing, ignore_err=True):
         """Return a directory listing emulating "/bin/ls -lA" UNIX
         command output.
-    
-        <basedir> is the absolute dirname, <listing> is a list of files
-        contained in that directory.
+
+         - basedir: the absolute dirname
+         - listing: a list containing the names of the entries in basedir
+         - ignore_err: if False raise exception if os.stat() call fails
     
         On platforms which do not support the pwd and grp modules (such
         as Windows), ownership is printed as "owner" and "group" as a
@@ -1043,27 +1111,21 @@ class AbstractedFS:
         -rw-rw-rw-   1 owner   group        380 Sep 02  3:40 module.py
         """
         result = []
-        if not hasattr(os, 'lstat'):
-            _stat = os.stat
-        else:
-            _stat = os.lstat
-
         for basename in listing:
             file = os.path.join(basedir, basename)
             try:
-                st = _stat(file)
-            except OSError:
-                continue
-                
+                st = self.lstat(file)
+            except os.error:
+                if ignore_err:
+                    continue
+                raise
             perms = filemode(st.st_mode)  # permissions
             nlinks = st.st_nlink  # number of links to inode
             if not nlinks:  # non-posix system, let's use a bogus value
                 nlinks = 1
             size = st.st_size  # file size
-    
             if pwd and grp:
-                # get user and group name, else just use the raw
-                # uid/gid from stat
+                # get user and group name, else just use the raw uid/gid
                 try:
                     uname = pwd.getpwuid(st.st_uid).pw_name
                 except KeyError:
@@ -1077,17 +1139,13 @@ class AbstractedFS:
                 # bogus values for owner and group
                 uname = "owner"
                 gname = "group"
-           
-            # stat.st_mtime could fail (-1) if file's last modification
-            # time is too old, in that case we return local time as
-            # last modification time.
+            # stat.st_mtime could fail (-1) if last mtime is too old
+            # in which case we return the local time as last mtime
             try:
                 mtime = time.strftime("%b %d %H:%M", time.localtime(st.st_mtime))
             except ValueError:
                 mtime = time.strftime("%b %d %H:%M")
-            
-            # if the file is a symlink, resolve it,
-            # e.g. "symlink -> real_file"
+            # if the file is a symlink, resolve it, e.g. "symlink -> realfile"
             if stat.S_ISLNK(st.st_mode):
                 basename = basename + " -> " + os.readlink(file)
                 
@@ -1095,6 +1153,88 @@ class AbstractedFS:
             result.append("%s %3s %-8s %-8s %8s %s %s\r\n" %(perms, nlinks,
                                                              uname, gname, size,
                                                              mtime, basename))
+        return ''.join(result)
+    
+    def format_mlsx(self, basedir, listing, ignore_err=True):
+        """Return a directory listing in a form suitable with MLSD and
+        MLST commands including a list of "facts" referring the listed
+        elements.
+        
+        See RFC-3659, chapter 7, to see what every single fact stands
+        for.
+
+         - basedir: the absolute dirname
+         - listing: a list containing the names of the entries in basedir
+         - ignore_err: if False raise exception if os.stat() call fails
+
+        Note that "facts" returned may change depending on the platform
+        and on what user specified by using the OPTS command (if
+        implemented).
+
+        This is how output could appear to the client issuing
+        a MLSD request:
+
+        type=file;size=156;modify=20071029155301;unique=801cd012; music.mp3
+        type=dir;size=4096;modify=20071127230206;unique=801e38e3; ebooks
+        type=file;size=211;modify=20071103093626;unique=801e38e2; module.py
+        """
+        ftype = size = modify = create = mode = uid = gid = unique = ""
+        result = []
+        for basename in listing:
+            file = os.path.join(basedir, basename)
+            try:
+                st = self.stat(file)
+            except OSError:
+                if ignore_err:
+                    continue
+                raise
+            # file type
+            if stat.S_ISDIR(st.st_mode):
+                if basename == '.':
+                    ftype = 'type=cdir;'
+                elif basename == '..':
+                    ftype = 'type=pdir;'
+                else:
+                    ftype = 'type=dir;'
+            else:
+                ftype = 'type=file;'
+            size = 'size=%s;' %st.st_size  # file size
+            # last modification time
+            try:
+                modify = 'modify=%s;' %time.strftime("%Y%m%d%H%M%S",
+                                       time.localtime(st.st_mtime))
+            except ValueError:
+                # stat.st_mtime could fail (-1) if last mtime is too old
+                modify = ""
+            if os.name == 'nt':
+                # on Windows we can provide also the creation time
+                try:
+                    create = 'create=%s;' %time.strftime("%Y%m%d%H%M%S",
+                                           time.localtime(st.st_ctime))
+                except ValueError:
+                    create = ""
+            # Provide uid, gid and mode facts if we're on a UNIX system.
+            # We assume that by checking if pwd and grp are imported.
+            # Theorically we could provide mode also on Windows but I'm
+            # not sure about its reliability.
+            if pwd and grp:
+                mode = 'UNIX.mode=%s;' %oct(st.st_mode & 0777)
+                uid = 'UNIX.uid=%s;' %st.st_uid
+                gid = 'UNIX.gid=%s;' %st.st_gid
+            # Provide unique fact (see RFC-3659, chapter 7.5.2) on
+            # posix platforms only; we get it by mixing st_dev and
+            # st_ino values which should be enough for granting an
+            # uniqueness for the file listed.
+            # The same approach is used by pure-ftpd.
+            # Implementors who want to provide unique fact on other
+            # platforms should use some platform-specific method (e.g.
+            # on Windows NTFS filesystems MTF records could be used).
+            if os.name == 'posix':
+                unique = "unique=%x%x;" %(st.st_dev, st.st_ino)
+
+            result.append("%s%s%s%s%s%s%s%s %s\r\n" %(ftype, size, modify,
+                                                      create, mode, uid, gid,
+                                                      unique, basename))
         return ''.join(result)
 
 
@@ -1293,13 +1433,14 @@ class FTPHandler(asynchat.async_chat):
             # real path destination belongs to the user's root
             # directory.  If provided path is a symlink we follow its
             # final destination to do so.
-            if cmd in ('APPE','CWD','MDTM','NLST','RETR','SIZE','STOR','XCWD'):
-                if not self.fs.checkpath(self.fs.translate(arg)):
-                    vpath = self.fs.normalize(arg)
+            if cmd in ('APPE','CWD','DELE','MDTM','NLST','MLSD','MLST','RETR',
+                       'RMD','SIZE','STOR','XCWD','XRMD'):
+                if not self.fs.validpath(self.fs.ftp2fs(arg)):
+                    line = self.fs.ftpnorm(arg)
                     err = '"%s" points to a path which is outside ' \
-                          "the user's root directory" %vpath
+                          "the user's root directory" %line
                     self.respond("550 %s." %err)
-                    self.log('FAIL %s "%s". %s.' %(cmd, vpath, err))
+                    self.log('FAIL %s "%s". %s.' %(cmd, line, err))
                     return
             method = getattr(self, 'ftp_' + cmd)
             method(arg)  # call the proper ftp_* method
@@ -1587,27 +1728,16 @@ class FTPHandler(asynchat.async_chat):
         # --- data transferring
 
     def ftp_LIST(self, line):
-        """Return a list of files in the specified directory to the client.
-        Defaults to the current working directory.
+        """Return a list of files in the specified directory to the
+        client.
         """
-        if line:
-            # some FTP clients like older versions of Konqueror or
-            # Nautilus erroneously issue /bin/ls-like LIST formats
-            # (e.g. "LIST -l", "LIST -al" and so on...) instead of
-            # passing a directory as the argument.  If we receive
-            # such a command, just LIST the current working directory.
-            if line.lower() in ("-a", "-l", "-al", "-la"):
-                path = self.fs.translate(self.fs.cwd)
-                line = self.fs.cwd
-            # otherwise we assume the arg is a directory name
-            else:
-                path = self.fs.translate(line)
-                line = self.fs.normalize(line)
-        # no argument, fall back on cwd as default
-        else:
-            path = self.fs.translate(self.fs.cwd)
+        # - If no argument, fall back on cwd as default.
+        # - Some older FTP clients erroneously issue /bin/ls-like LIST
+        #   formats in which case we fall back on cwd as default.
+        if not line or line.lower() in ('-a', '-l', '-al', '-la'):
             line = self.fs.cwd
-            
+        path = self.fs.ftp2fs(line)
+        line = self.fs.ftpnorm(line)
         try:
             data = self.fs.get_list_dir(path)
         except OSError, err:
@@ -1617,45 +1747,101 @@ class FTPHandler(asynchat.async_chat):
         else:
             self.push_dtp_data(data, log='OK LIST "%s". Transfer starting.' %line)
 
-
     def ftp_NLST(self, line):
         """Return a list of files in the specified directory in a
-        compact form to the client. Default to the current directory.
+        compact form to the client.
         """
-        if line:
-            path = self.fs.translate(line)
-            line = self.fs.normalize(line)
-        else:
-            path = self.fs.translate(self.fs.cwd)
+        if not line:
             line = self.fs.cwd
-
-        if self.fs.isfile(path) or self.fs.islink(path):
-            basedir, filename = os.path.split(path)
-            listing = [filename]
-        else:
-            try:
+        path = self.fs.ftp2fs(line)
+        line = self.fs.ftpnorm(line)
+        try:
+            if self.fs.isdir(path):
                 listing = self.fs.listdir(path)
-            except OSError, err:
-                why = _strerror(err)
-                self.log('FAIL NLST "%s". %s.' %(line, why))
-                self.respond('550 %s.' %why)
-                return
-        data = ''
-        if listing:
-            listing.sort()
-            data = '\r\n'.join(listing) + '\r\n'
-        self.push_dtp_data(data, log='OK NLST "%s". Transfer starting.' %line)
+            else:
+                # if path is a file we just list its name
+                self.fs.lstat(path)  # raise exc in case of problems
+                basedir, filename = os.path.split(path)
+                listing = [filename]
+        except OSError, err:
+            why = _strerror(err)
+            self.log('FAIL NLST "%s". %s.' %(line, why))
+            self.respond('550 %s.' %why)
+        else:
+            data = ''
+            if listing:
+                listing.sort()
+                data = '\r\n'.join(listing) + '\r\n'
+            self.push_dtp_data(data, log='OK NLST "%s". Transfer starting.' %line)
 
+        # --- MLST and MLSD commands
 
+    # The MLST and MLSD commands are intended to standardize the file and
+    # directory information returned by the server-FTP process.  These
+    # commands differ from the LIST command in that the format of the
+    # replies is strictly defined although extensible.
+
+    def ftp_MLST(self, line):
+        """Return information about a pathname in a machine-processable
+        form as defined in RFC-3659.
+        """
+        # if no argument, fall back on cwd as default
+        if not line:
+            line = self.fs.cwd
+        path = self.fs.ftp2fs(line)
+        line = self.fs.ftpnorm(line)
+        basedir, basename = os.path.split(path)
+        try:
+            data = self.fs.format_mlsx(basedir, [basename], ignore_err=False)
+        except OSError, err:
+            why = _strerror(err)
+            self.log('FAIL MLST "%s". %s.' %(line, why))
+            self.respond('550 %s.' %why)
+        else:
+            # where TVFS is supported, a fully qualified pathname
+            # should be returned
+            data = data.split(' ')[0] + ' %s\r\n'%line
+            # response is expected on the command channel
+            self.push('250-Listing "%s":\r\n' %line)
+            # the fact set must be preceded by a space
+            self.push(' ' + data)
+            self.respond('250 End MLST.')
+
+    def ftp_MLSD(self, line):
+        """Return contents of a directory in a machine-processable form
+        as defined in RFC-3659.
+        """
+        # if no argument, fall back on cwd as default
+        if not line:
+            line = self.fs.cwd
+        path = self.fs.ftp2fs(line)
+        line = self.fs.ftpnorm(line)
+        # RFC-3659 requires 501 response code if path is not a directory
+        if not self.fs.isdir(path):
+            err = 'No such directory'
+            self.log('FAIL MLSD "%s". %s.' %(line, err))
+            self.respond("501 %s." %err)
+            return
+        try:
+            listing = self.fs.listdir(path)
+        except OSError, err:
+            why = _str(err)
+            self.log('FAIL MLSD "%s". %s.' %(line, why))
+            self.respond('550 %s.' %why)
+        else:
+            data = self.fs.format_mlsx(path, listing)
+            self.push_dtp_data(data, log='OK MLSD "%s". Transfer starting.' %line)
+
+        
     def ftp_RETR(self, line):
         """Retrieve the specified file (transfer from the server to the
         client)
         """
-        file = self.fs.translate(line)
+        file = self.fs.ftp2fs(line)
 
         if not self.authorizer.r_perm(self.username, file):
             self.log('FAIL RETR "s". Not enough privileges.'
-                        %self.fs.normalize(line))
+                        %self.fs.ftpnorm(line))
             self.respond("550 Can't RETR: not enough privileges.")
             return
 
@@ -1663,7 +1849,7 @@ class FTPHandler(asynchat.async_chat):
             fd = self.fs.open(file, 'rb')
         except IOError, err:
             why = _strerror(err)
-            self.log('FAIL RETR "%s". %s.' %(self.fs.normalize(line), why))
+            self.log('FAIL RETR "%s". %s.' %(self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
             return
 
@@ -1685,11 +1871,11 @@ class FTPHandler(asynchat.async_chat):
             self.restart_position = 0
             if not ok:
                 self.respond('554 %s' %why)
-                self.log('FAIL RETR "%s". %s.' %(self.fs.normalize(line), why))
+                self.log('FAIL RETR "%s". %s.' %(self.fs.ftpnorm(line), why))
                 return
         producer = FileProducer(fd, self.current_type)
         self.push_dtp_data(producer, isproducer=1,
-            log='OK RETR "%s". Download starting.' %self.fs.normalize(line))
+            log='OK RETR "%s". Download starting.' %self.fs.ftpnorm(line))
 
 
     def ftp_STOR(self, line, mode='w'):
@@ -1703,11 +1889,11 @@ class FTPHandler(asynchat.async_chat):
             cmd = 'APPE'
         else:
             cmd = 'STOR'
-        file = self.fs.translate(line)
+        file = self.fs.ftp2fs(line)
 
         if not self.authorizer.w_perm(self.username, os.path.dirname(file)):
             self.log('FAIL %s "%s". Not enough privileges.'
-                        %(cmd, self.fs.normalize(line)))
+                        %(cmd, self.fs.ftpnorm(line)))
             self.respond("550 Can't STOR: not enough privileges.")
             return
 
@@ -1718,7 +1904,7 @@ class FTPHandler(asynchat.async_chat):
             fd = self.fs.open(file, mode + 'b')
         except IOError, err:
             why = _strerror(err)
-            self.log('FAIL %s "%s". %s.' %(cmd, self.fs.normalize(line), why))
+            self.log('FAIL %s "%s". %s.' %(cmd, self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
             return
 
@@ -1740,10 +1926,10 @@ class FTPHandler(asynchat.async_chat):
             self.restart_position = 0
             if not ok:
                 self.respond('554 %s' %why)
-                self.log('FAIL %s "%s". %s.' %(cmd, self.fs.normalize(line), why))
+                self.log('FAIL %s "%s". %s.' %(cmd, self.fs.ftpnorm(line), why))
                 return
 
-        log = 'OK %s "%s". Upload starting.' %(cmd, self.fs.normalize(line))
+        log = 'OK %s "%s". Upload starting.' %(cmd, self.fs.ftpnorm(line))
         if self.data_channel:
             self.respond("125 Data connection already open. Transfer starting.")
             self.log(log)
@@ -1772,15 +1958,15 @@ class FTPHandler(asynchat.async_chat):
             return
 
         if line:
-            basedir, prefix = os.path.split(self.fs.translate(line))
+            basedir, prefix = os.path.split(self.fs.ftp2fs(line))
             prefix = prefix + '.'
         else:
-            basedir = self.fs.translate(self.fs.cwd)
+            basedir = self.fs.ftp2fs(self.fs.cwd)
             prefix = 'ftpd.'
 
         if not self.authorizer.w_perm(self.username, basedir):
             self.log('FAIL STOU "%s". Not enough privileges' \
-                        %self.fs.normalize(line))
+                        %self.fs.ftpnorm(line))
             self.respond("550 Can't STOU: not enough privileges.")
             return
 
@@ -1795,7 +1981,7 @@ class FTPHandler(asynchat.async_chat):
             else:
                 why = _strerror(err)
             self.respond("450 %s." %why)
-            self.log('FAIL STOU "%s". %s.' %(self.fs.normalize(line), why))
+            self.log('FAIL STOU "%s". %s.' %(self.fs.ftpnorm(line), why))
             return
 
         filename = os.path.basename(fd.name)
@@ -1977,30 +2163,16 @@ class FTPHandler(asynchat.async_chat):
         # official references about this behaviour.
         if not line:
             line = '/'
-
-        # When CWD is received we temporarily join the specified
-        # directory to see if we have permissions to do so.
-        # A more elegant way to do that would be using os.access
-        # instead but we can't be sure about its reliability on
-        # non-posix platforms (see, for example, Python bug #1513646)
-        # or when specified paths are network filesystems.
-        ftp_path = self.fs.normalize(line)
-        real_path = self.fs.translate(line)
-        old_dir = os.getcwd()
+        path = self.fs.ftp2fs(line)
         try:
-            self.fs.chdir(real_path)
+            self.fs.chdir(path)
         except OSError, err:
             why = _strerror(err)
-            self.log('FAIL CWD "%s". %s.' %(self.fs.normalize(line), why))
+            self.log('FAIL CWD "%s". %s.' %(self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
         else:
-            self.fs.cwd = ftp_path
             self.log('OK CWD "%s".' %self.fs.cwd)
             self.respond('250 "%s" is the current directory.' %self.fs.cwd)
-            # let's use os.chdir instead of self.fs.chdir: we don't
-            # want to  go back to the original directory by using
-            # user's permissions.
-            os.chdir(old_dir)
 
     def ftp_CDUP(self, line):
         """Change into the parent directory."""
@@ -2026,7 +2198,7 @@ class FTPHandler(asynchat.async_chat):
         ASCII mode.  Resuming downloads in binary mode is the recommended
         way as specified in RFC-3659.
         """
-        path = self.fs.translate(line)
+        path = self.fs.ftp2fs(line)
         if self.fs.isdir(path):
             self.respond("550 Could not get a directory size.")
             return
@@ -2034,17 +2206,17 @@ class FTPHandler(asynchat.async_chat):
             size = self.fs.getsize(path)
         except OSError, err:
             why = _strerror(err)
-            self.log('FAIL SIZE "%s". %s' %(self.fs.normalize(line), why))
+            self.log('FAIL SIZE "%s". %s' %(self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
         else:
             self.respond("213 %s" %size)
-            self.log('OK SIZE "%s".' %self.fs.normalize(line))
+            self.log('OK SIZE "%s".' %self.fs.ftpnorm(line))
 
     def ftp_MDTM(self, line):
         """Return last modification time of file to the client as an ISO
         3307 style timestamp (YYYYMMDDHHMMSS) as defined in RFC-3659.
         """
-        path = self.fs.translate(line)
+        path = self.fs.ftp2fs(line)
         if not self.fs.isfile(path):
             self.respond("550 No such file.")
             return
@@ -2052,20 +2224,20 @@ class FTPHandler(asynchat.async_chat):
             lmt = self.fs.getmtime(path)
         except OSError, err:
             why = _strerror(err)
-            self.log('FAIL MDTM "%s". %s' %(self.fs.normalize(line), why))
+            self.log('FAIL MDTM "%s". %s' %(self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
         else:
             lmt = time.strftime("%Y%m%d%H%M%S", time.localtime(lmt))
             self.respond("213 %s" %lmt)
-            self.log('OK MDTM "%s".' %self.fs.normalize(line))
+            self.log('OK MDTM "%s".' %self.fs.ftpnorm(line))
             
     def ftp_MKD(self, line):
         """Create the specified directory."""
-        path = self.fs.translate(line)
+        path = self.fs.ftp2fs(line)
 
         if not self.authorizer.w_perm(self.username, os.path.dirname(path)):
             self.log('FAIL MKD "%s". Not enough privileges.'
-                        %self.fs.normalize(line))
+                        %self.fs.ftpnorm(line))
             self.respond("550 Can't MKD: not enough privileges.")
             return
 
@@ -2073,15 +2245,15 @@ class FTPHandler(asynchat.async_chat):
             self.fs.mkdir(path)
         except OSError, err:
             why = _strerror(err)
-            self.log('FAIL MKD "%s". %s.' %(self.fs.normalize(line), why))
+            self.log('FAIL MKD "%s". %s.' %(self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
         else:
-            self.log('OK MKD "%s".' %self.fs.normalize(line))
+            self.log('OK MKD "%s".' %self.fs.ftpnorm(line))
             self.respond("257 Directory created.")
 
     def ftp_RMD(self, line):
         """Remove the specified directory."""
-        path = self.fs.translate(line)
+        path = self.fs.ftp2fs(line)
 
         if path == self.fs.root:
             msg = "Can't remove root directory."
@@ -2090,7 +2262,7 @@ class FTPHandler(asynchat.async_chat):
             return
 
         if not self.authorizer.w_perm(self.username, path):
-            self.log('FAIL RMD "%s". Not enough privileges.' %self.fs.normalize(line))
+            self.log('FAIL RMD "%s". Not enough privileges.' %self.fs.ftpnorm(line))
             self.respond("550 Can't RMD: not enough privileges.")
             return
 
@@ -2098,19 +2270,19 @@ class FTPHandler(asynchat.async_chat):
             self.fs.rmdir(path)
         except OSError, err:
             why = _strerror(err)
-            self.log('FAIL RMD "%s". %s.' %(self.fs.normalize(line), why))
+            self.log('FAIL RMD "%s". %s.' %(self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
         else:
-            self.log('OK RMD "%s".' %self.fs.normalize(line))
+            self.log('OK RMD "%s".' %self.fs.ftpnorm(line))
             self.respond("250 Directory removed.")
 
     def ftp_DELE(self, line):
         """Delete the specified file."""
-        path = self.fs.translate(line)
+        path = self.fs.ftp2fs(line)
 
         if not self.authorizer.w_perm(self.username, path):
             self.log('FAIL DELE "%s". Not enough privileges.'
-                        %self.fs.normalize(line))
+                        %self.fs.ftpnorm(line))
             self.respond("550 Can't DELE: not enough privileges.")
             return
 
@@ -2118,20 +2290,20 @@ class FTPHandler(asynchat.async_chat):
             self.fs.remove(path)
         except OSError, err:
             why = _strerror(err)
-            self.log('FAIL DELE "%s". %s.' %(self.fs.normalize(line), why))
+            self.log('FAIL DELE "%s". %s.' %(self.fs.ftpnorm(line), why))
             self.respond('550 %s.' %why)
         else:
-            self.log('OK DELE "%s".' %self.fs.normalize(line))
+            self.log('OK DELE "%s".' %self.fs.ftpnorm(line))
             self.respond("250 File removed.")
 
     def ftp_RNFR(self, line):
         """Rename the specified (only the source name is specified
         here, see RNTO command)"""
-        path = self.fs.translate(line)
+        path = self.fs.ftp2fs(line)
 
         if not self.authorizer.w_perm(self.username, path):
             self.log('FAIL RNFR "%s". Not enough privileges for renaming.'
-                     %(self.fs.normalize(line)))
+                     %(self.fs.ftpnorm(line)))
             self.respond("550 Can't RNRF: not enough privileges.")
             return
 
@@ -2149,13 +2321,13 @@ class FTPHandler(asynchat.async_chat):
             self.respond("503 Bad sequence of commands: use RNFR first.")
             return
 
-        src = self.fs.translate(self.fs.rnfr)
-        dst = self.fs.translate(line)
+        src = self.fs.ftp2fs(self.fs.rnfr)
+        dst = self.fs.ftp2fs(line)
 
         if not self.authorizer.w_perm(self.username, self.fs.rnfr):
             self.log('FAIL RNFR/RNTO "%s ==> %s". ' 'Not enough privileges for '
-                     'renaming.' %(self.fs.normalize(self.fs.rnfr),
-                                   self.fs.normalize(line)))
+                     'renaming.' %(self.fs.ftpnorm(self.fs.rnfr),
+                                   self.fs.ftpnorm(line)))
             self.respond("550 Can't RNTO: not enough privileges.")
             self.fs.rnfr = None
             return
@@ -2166,11 +2338,11 @@ class FTPHandler(asynchat.async_chat):
             except OSError, err:
                 why = _strerror(err)
                 self.log('FAIL RNFR/RNTO "%s ==> %s". %s.'
-                    %(self.fs.normalize(self.fs.rnfr), self.fs.normalize(line), why))
+                    %(self.fs.ftpnorm(self.fs.rnfr), self.fs.ftpnorm(line), why))
                 self.respond('550 %s.' %why)
             else:
                 self.log('OK RNFR/RNTO "%s ==> %s".'
-                    %(self.fs.normalize(self.fs.rnfr), self.fs.normalize(line)))
+                    %(self.fs.ftpnorm(self.fs.rnfr), self.fs.ftpnorm(line)))
                 self.respond("250 Renaming ok.")
         finally:
             self.fs.rnfr = None
@@ -2235,7 +2407,8 @@ class FTPHandler(asynchat.async_chat):
                 s.append('Total bytes received: %s' %dc.tot_bytes_received)
             else:
                 s.append('Data connection closed.')
-            self.push('211-%s %s status:\r\n' %(__pname__, __ver__))
+
+            self.push('211-FTP server status:\r\n')
             self.push(''.join([' %s\r\n' %item for item in s]))
             self.respond('211 End of status.')
 
@@ -2260,7 +2433,7 @@ class FTPHandler(asynchat.async_chat):
                 data = self.fs.get_stat_dir(line)
             except OSError, err:
                 data = _strerror(err) + '.\r\n'
-            self.push('213-Status of "%s":\r\n' %self.fs.normalize(line))
+            self.push('213-Status of "%s":\r\n' %self.fs.ftpnorm(line))
             self.push(data)
             self.respond('213 End of status.')
 
