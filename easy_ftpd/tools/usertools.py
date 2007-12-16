@@ -32,7 +32,8 @@ def load(userfile):
     users = {}
     
     for line in userfile:
-        if line.startswith("#"): # comment. ignore
+        # empty line or comment. ignore
+        if not line.strip() or line.startswith("#"): 
             continue
         name,pw,perms,root = line.split(":",3)
         root = root.rstrip("\n")
