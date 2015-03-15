@@ -1,0 +1,44 @@
+# Installation #
+This really doesn't require a guide but here it is anyways:
+
+  1. Download easyFTPD from here
+  1. Unpack it by doing
+```
+tar zxvf easyftpd.tar.gz
+```
+  1. cd to the unpacked directory
+```
+cd easyftpd
+```
+  1. Install easyFTPD by running the following as superuser
+```
+python setup.py install
+```
+
+# Running easyFTPD #
+easyFTPD can both be used by a super-user as a "regular" ftp-server on port 21, or by a non-super-user on non-privileged ports. By default easyFTPD is configured to run at port 21, but this can either be changed in the configuration file (/etc/easyftpd/config) or by starting the application using the **-p** option.
+
+To run easyFTPD with the default settings, simply write
+
+```
+easyftpd
+```
+
+To change the settings, you can modify the config-file or pass optional arguments listed below.
+
+## easyFTPD options ##
+
+easyFTPD has a number of optional argument options
+
+| **-p PORTNO** |       Port to run server at (Default: default-port in config-file)|
+|:--------------|:------------------------------------------------------------------|
+| **-c FILEPATH** |     Configuration file (Default: /etc/easyftpd/config)|
+| **-l DIRPATH** |      Directory to use for logging (Default: /var/log/easyftpd)|
+| **-d** |              Run in the background as a daemon|
+| **-s** |              Silent mode. Disables logging|
+| **-h, --help** |      Print available options|
+
+For an example, the following line starts easyFTPD as a background process on port 12345 without logging.
+```
+easyftpd -d -p 12345 -s
+```
